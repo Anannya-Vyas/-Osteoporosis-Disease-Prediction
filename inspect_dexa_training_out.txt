@@ -1,0 +1,333 @@
+INSPECTING NOTEBOOK: models/ML_MODEL(WITH DEXA)/model_training.ipynb
+Total cells: 31
+
+--- Cell 0 (markdown) [Matched: ['feature', 'hyperparameter', 'cleaned_dataset']] ---
+# Best-Accuracy Binary Classification Pipeline
+
+This notebook trains and compares multiple classifiers on `cleaned_dataset.csv`,
+tunes the best-performing ones with cross-validated hyperparameter search, and
+reports **accuracy, precision, recall, F1, ROC-AUC, and confusion matrices** for
+every model, so you can pick (or we auto-pick) the true best one.
+
+**Dataset summary (already checked):**
+- 1936 rows, 20 numeric (already scaled) features, target column `op`
+- Classes are perfectly balanced (968 / 968) → accuracy is a fair metric here, but we still track precision/recall/F1/AUC
+- No missing values
+
+Just run all cells top to bottom. Update `DATA_PATH` if you move the CSV.
+
+--- Cell 1 (code) [Matched: ['select', 'extratrees', 'train_test_split']] ---
+# 1. Imports
+import numpy as np
+from pathlib import Path
+import pandas as pd
+import warnings
+warnings.filterwarnings("ignore")
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.model_selection import train_test_split, StratifiedKFold, RandomizedSearchCV, cross_val_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier,
+                               ExtraTreesClassifier, AdaBoostClassifier, VotingClassifier)
+from sklearn.naive_bayes import GaussianNB
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
+                              roc_auc_score, confusion_matrix, classification_report,
+                              RocCurveDisplay)
+
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+
+RANDOM_STATE = 42
+np.random.seed(RANDOM_STATE)
+
+--- Cell 2 (code) [Matched: ['cleaned_dataset']] ---
+df = pd.read_csv("cleaned_dataset.csv")
+print('Shape:', df.shape)
+display(df.head())
+display(df.info())
+
+--- Cell 4 (markdown) [Matched: ['feature']] ---
+## 3. Quick EDA
+Class balance, correlation with target, and feature correlation heatmap to spot redundancy.
+
+--- Cell 5 (code) [Matched: ['feature', 'columns', 'drop']] ---
+fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+df[TARGET].value_counts().plot(kind="bar", ax=ax[0], color=["#4C72B0", "#DD8452"])
+ax[0].set_title("Target class balance")
+ax[0].set_xlabel("op"); ax[0].set_ylabel("count")
+
+corr_target = df.drop(columns=[TARGET]).corrwith(df[TARGET]).sort_values()
+corr_target.plot(kind="barh", ax=ax[1], color="#55A868")
+ax[1].set_title("Feature correlation with target")
+plt.tight_layout()
+plt.show()
+
+--- Cell 6 (code) [Matched: ['feature']] ---
+plt.figure(figsize=(11, 9))
+sns.heatmap(df.corr(), cmap="coolwarm", center=0, annot=False)
+plt.title("Feature correlation matrix")
+plt.tight_layout()
+plt.show()
+
+--- Cell 7 (markdown) [Matched: ['feature']] ---
+## 4. Train / test split
+Stratified split so both classes stay balanced in train and test. Features already look
+standardized, but we re-fit a `StandardScaler` on the training set only (avoids leakage)
+in case of new/raw data later.
+
+--- Cell 8 (code) [Matched: ['columns', 'drop', 'train_test_split']] ---
+X = df.drop(columns=[TARGET])
+y = df[TARGET]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=RANDOM_STATE
+)
+
+scaler = StandardScaler()
+X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns, index=X_train.index)
+X_test_s  = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
+
+print(X_train_s.shape, X_test_s.shape)
+
+--- Cell 10 (code) [Matched: ['extratrees', 'drop']] ---
+models = {
+    "LogisticRegression": LogisticRegression(max_iter=2000, random_state=RANDOM_STATE),
+    "KNN": KNeighborsClassifier(),
+    "SVM (RBF)": SVC(probability=True, random_state=RANDOM_STATE),
+    "DecisionTree": DecisionTreeClassifier(random_state=RANDOM_STATE),
+    "RandomForest": RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=-1),
+    "ExtraTrees": ExtraTreesClassifier(random_state=RANDOM_STATE, n_jobs=-1),
+    "GradientBoosting": GradientBoostingClassifier(random_state=RANDOM_STATE),
+    "AdaBoost": AdaBoostClassifier(random_state=RANDOM_STATE),
+    "XGBoost": XGBClassifier(eval_metric="logloss", random_state=RANDOM_STATE, n_jobs=-1),
+}
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+results = []
+for name, clf in models.items():
+    acc = cross_val_score(clf, X_train_s, y_train, cv=cv, scoring="accuracy", n_jobs=-1)
+    auc = cross_val_score(clf, X_train_s, y_train, cv=cv, scoring="roc_auc", n_jobs=-1)
+    f1  = cross_val_score(clf, X_train_s, y_train, cv=cv, scoring="f1", n_jobs=-1)
+    results.append({
+        "model": name,
+        "cv_accuracy_mean": acc.mean(), "cv_accuracy_std": acc.std(),
+        "cv_auc_mean": auc.mean(), "cv_f1_mean": f1.mean(),
+    })
+
+results_df = pd.DataFrame(results).sort_values("cv_accuracy_mean", ascending=False).reset_index(drop=True)
+results_df
+
+--- Cell 12 (markdown) [Matched: ['hyperparameter']] ---
+## 6. Hyperparameter tuning of top candidates
+We take the top 3 models from the sweep above and tune them with `RandomizedSearchCV`
+(cross-validated, scoring on accuracy) to squeeze out the best possible performance.
+
+--- Cell 13 (code) [Matched: ['feature', 'extratrees', 'params']] ---
+top3 = results_df["model"].head(3).tolist()
+print("Tuning:", top3)
+
+param_grids = {
+    "RandomForest": (RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=-1), {
+        "n_estimators": [200, 400, 600, 800],
+        "max_depth": [None, 5, 10, 15, 20],
+        "min_samples_split": [2, 5, 10],
+        "min_samples_leaf": [1, 2, 4],
+        "max_features": ["sqrt", "log2", None],
+    }),
+    "ExtraTrees": (ExtraTreesClassifier(random_state=RANDOM_STATE, n_jobs=-1), {
+        "n_estimators": [200, 400, 600, 800],
+        "max_depth": [None, 5, 10, 15, 20],
+        "min_samples_split": [2, 5, 10],
+        "min_samples_leaf": [1, 2, 4],
+    }),
+    "GradientBoosting": (GradientBoostingClassifier(random_state=RANDOM_STATE), {
+        "n_estimators": [100, 200, 300, 500],
+        "learning_rate": [0.01, 0.05, 0.1, 0.2],
+        "max_depth": [2, 3, 4, 5],
+        "subsample": [0.7, 0.85, 1.0],
+    }),
+    "XGBoost": (XGBClassifier(eval_metric="logloss", random_state=RANDOM_STATE, n_jobs=-1), {
+        "n_estimators": [100, 200, 300, 500],
+        "learning_rate": [0.01, 0.05, 0.1, 0.2],
+        "max_depth": [2, 3, 4, 5, 6],
+        "subsample": [0.7, 0.85, 1.0],
+        "colsample_bytree": [0.7, 0.85, 1.0],
+    }),
+    "SVM (RBF)": (SVC(probability=True, random_state=RANDOM_STATE), {
+        "C": [0.1, 1, 10, 100],
+        "gamma": ["scale", "auto", 0.001, 0.01, 0.1],
+        "kernel": ["rbf"],
+    }),
+    "LogisticRegression": (LogisticRegression(max_iter=3000, random_state=RANDOM_STATE), {
+        "C": [0.01, 0.1, 1, 10, 100],
+        "penalty": ["l2"],
+        "solver": ["lbfgs", "liblinear"],
+    }),
+    "KNN": (KNeighborsClassifier(), {
+        "n_neighbors": [3, 5, 7, 9, 11, 15],
+        "weights": ["uniform", "distance"],
+        "p": [1, 2],
+    }),
+    "AdaBoost": (AdaBoostClassifier(random_state=RANDOM_STATE), {
+        "n_estimators": [50, 100, 200, 400],
+        "learning_rate": [0.01, 0.05, 0.1, 0.5, 1.0],
+    }),
+    "DecisionTree": (DecisionTreeClassifier(random_state=RANDOM_STATE), {
+        "max_depth": [None, 5, 10, 15, 20],
+        "min_samples_split": [2, 5, 10],
+        "min_samples_leaf": [1, 2, 4],
+    }),
+    
+}
+
+tuned_models = {}
+for name in top3:
+    base_clf, grid = param_grids[name]
+    if len(grid) == 0:
+        tuned_models[name] = base_clf.fit(X_train_s, y_train)
+        continue
+    search = RandomizedSearchCV(
+        base_clf, grid, n_iter=40, scoring="accuracy", cv=cv,
+        random_state=RANDOM_STATE, n_jobs=-1, verbose=0
+    )
+    search.fit(X_train_s, y_train)
+    tuned_models[name] = search.best_estimator_
+    print(f"{name}: best CV accuracy = {search.best_score_:.4f}")
+    print(f"  best params: {search.best_params_}\n")
+
+--- Cell 15 (code) [Matched: ['drop']] ---
+def evaluate(name, clf, X_te, y_te):
+    y_pred = clf.predict(X_te)
+    y_proba = clf.predict_proba(X_te)[:, 1] if hasattr(clf, "predict_proba") else None
+    metrics = {
+        "model": name,
+        "accuracy": accuracy_score(y_te, y_pred),
+        "precision": precision_score(y_te, y_pred),
+        "recall": recall_score(y_te, y_pred),
+        "f1": f1_score(y_te, y_pred),
+        "roc_auc": roc_auc_score(y_te, y_proba) if y_proba is not None else np.nan,
+    }
+    return metrics, y_pred, y_proba
+
+test_results = []
+preds_store = {}
+for name, clf in tuned_models.items():
+    m, y_pred, y_proba = evaluate(name, clf, X_test_s, y_test)
+    test_results.append(m)
+    preds_store[name] = (y_pred, y_proba)
+
+test_results_df = pd.DataFrame(test_results).sort_values("accuracy", ascending=False).reset_index(drop=True)
+test_results_df
+
+--- Cell 17 (code) [Matched: ['drop']] ---
+voting_clf = VotingClassifier(
+    estimators=[(name, clf) for name, clf in tuned_models.items()],
+    voting="soft"
+)
+voting_clf.fit(X_train_s, y_train)
+m_vote, y_pred_vote, y_proba_vote = evaluate("VotingEnsemble", voting_clf, X_test_s, y_test)
+preds_store["VotingEnsemble"] = (y_pred_vote, y_proba_vote)
+
+test_results_df = pd.concat([test_results_df, pd.DataFrame([m_vote])], ignore_index=True)
+test_results_df = test_results_df.sort_values("accuracy", ascending=False).reset_index(drop=True)
+test_results_df
+
+--- Cell 21 (markdown) [Matched: ['feature']] ---
+## 10. Feature importance (if applicable)
+Tree-based models expose feature importances — useful for understanding what's driving
+predictions, even though it's not required for the accuracy goal itself.
+
+--- Cell 22 (code) [Matched: ['feature', 'columns']] ---
+if hasattr(best_clf, "feature_importances_"):
+    importances = pd.Series(best_clf.feature_importances_, index=X.columns).sort_values(ascending=False)
+    plt.figure(figsize=(8, 6))
+    sns.barplot(x=importances.values, y=importances.index, palette="magma")
+    plt.title(f"Feature importances — {best_name}")
+    plt.tight_layout()
+    plt.show()
+    importances
+else:
+    print(f"{best_name} does not expose feature_importances_ directly (e.g. it's a linear/kernel model or ensemble of mixed models).")
+
+--- Cell 26 (code) [Matched: ['feature', 'columns', 'best_model']] ---
+import joblib
+
+joblib.dump({"scaler": scaler, "model": best_clf, "features": list(X.columns), "model_name": best_name},
+            "best_model_pipeline.joblib")
+print(f"Saved best model ({best_name}) to best_model_pipeline.joblib")
+
+--- Cell 27 (code) [Matched: ['feature', 'columns', 'best_model']] ---
+joblib.dump({
+    "scaler": scaler,
+    "model": best_clf,
+    "features": list(X.columns),
+    "model_name": best_name
+}, "best_model_pipeline.joblib")
+
+--- Cell 28 (code) [Matched: ['feature', 'best_model']] ---
+import joblib
+import pandas as pd
+
+# Load saved pipeline
+saved = joblib.load("best_model_pipeline.joblib")
+
+# Extract objects
+model = saved["model"]
+scaler = saved["scaler"]
+features = saved["features"]   # <-- This defines 'features'
+
+print(features)   # Check the feature names
+
+--- Cell 29 (code) [Matched: ['feature', 'columns']] ---
+new_patient = {
+    "fnt": 0.35,
+    "calcitriol": -0.45,
+    "uric": 0.62,
+    "alt": -0.18,
+    "bun": 0.40,
+    "crea": -0.12,
+    "fbg": 0.28,
+    "ldl_c": 0.55,
+    "l1_4t": -0.08,
+    "age": 0.75,
+    "hdl_c": -0.15,
+    "bmi": 0.48,
+    "ca": -0.03,
+    "p": 0.12,
+    "height": 0.60,
+    "ast": -0.10,
+    "weight": 0.72,
+    "calsium": -0.41,
+    "calcitonin": -0.25,
+    "as": 0.58
+}
+
+df = pd.DataFrame([new_patient])
+
+# Keep columns in the same order as training
+df = df[features]
+
+# Scale
+df_scaled = scaler.transform(df)
+
+# Predict
+prediction = model.predict(df_scaled)[0]
+probability = model.predict_proba(df_scaled)[0]
+
+print("Prediction:", prediction)
+print("Probability:", probability)
+
+--- Cell 30 (markdown) [Matched: ['feature', 'select', 'gridsearch', 'params']] ---
+---
+### Notes on getting the best possible accuracy
+- The dataset is perfectly balanced, so accuracy is a meaningful headline metric here — but precision/recall/F1/AUC are reported for every model so you're not fooled by an accuracy-only view.
+- `RandomizedSearchCV` with 40 iterations over each top model's grid is a good accuracy/runtime tradeoff. If you want to push further: increase `n_iter`, switch to `GridSearchCV` on a narrowed grid around the best params found here, or try `Optuna` for smarter search.
+- The soft-voting ensemble usually matches or slightly beats the single best tuned model — worth keeping if it wins on your run.
+- If accuracy still isn't where you want it, the next lever is usually **feature engineering** (interaction terms, domain-specific ratios) rather than more model tuning, since these features already look pre-scaled/pre-selected.
+

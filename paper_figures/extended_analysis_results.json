@@ -1,0 +1,73 @@
+{
+  "rule_baseline_2t": {
+    "accuracy": 0.698051948051948,
+    "sensitivity": 0.37719298245614036,
+    "specificity": 0.8865979381443299,
+    "ppv": 0.6615384615384615,
+    "npv": 0.7078189300411523,
+    "cm": {
+      "tn": 172,
+      "fp": 22,
+      "fn": 71,
+      "tp": 43
+    }
+  },
+  "rule_baseline_3t": {
+    "accuracy": 0.7045454545454546,
+    "sensitivity": 0.39473684210526316,
+    "specificity": 0.8865979381443299,
+    "ppv": 0.6716417910447762,
+    "f1": 0.4972375690607735,
+    "share_op1_cohort": 0.41725352112676056,
+    "share_op0_cohort": 0.12280701754385964,
+    "cm": {
+      "tn": 172,
+      "fp": 22,
+      "fn": 69,
+      "tp": 45
+    }
+  },
+  "bootstrap_ci": {
+    "n_resamples": 1000,
+    "valid_samples": 1000,
+    "accuracy": {
+      "point": 0.7922077922077922,
+      "ci_lower": 0.7467532467532467,
+      "ci_upper": 0.8344155844155844
+    },
+    "sensitivity": {
+      "point": 0.5964912280701754,
+      "ci_lower": 0.5045871559633027,
+      "ci_upper": 0.6830024188671638
+    },
+    "specificity": {
+      "point": 0.9072164948453608,
+      "ci_lower": 0.864304476930105,
+      "ci_upper": 0.9476744186046512
+    },
+    "auc": {
+      "point": 0.8747513112678604,
+      "ci_lower": 0.8359742163964811,
+      "ci_upper": 0.914920635299054
+    }
+  },
+  "screening_threshold": {
+    "threshold": 0.37951289610930705,
+    "chosen_on": "training_set_only",
+    "criterion": "target_training_sensitivity_gte_80",
+    "target_sensitivity": 0.8,
+    "test_accuracy": 0.814935064935065,
+    "test_sensitivity": 0.7807017543859649,
+    "test_specificity": 0.8350515463917526,
+    "test_precision": 0.7355371900826446,
+    "test_f1": 0.7574468085106383,
+    "sensitivity_change_pp": 18.42105263157895,
+    "specificity_change_pp": -7.216494845360821,
+    "cm": {
+      "tn": 162,
+      "fp": 32,
+      "fn": 25,
+      "tp": 89
+    }
+  }
+}
